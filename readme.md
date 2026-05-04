@@ -119,7 +119,7 @@ architecture.md   Full architecture description for block diagram
 
 ## Acknowledgements
 
-This work builds on [P2P-Bridge](https://github.com/matvogel/P2P-Bridge) (Vogel et al., ECCV 2024) and the PVCNN architecture. The SemanticAutoencoder and FreqEncodingTransformer are adapted from latent DDPM prior work.
+This work uses the PVCNN architecture. The SemanticAutoencoder and FreqEncodingTransformer are original contributions of this project.
 
 ## Recent changes (2026-05-03)
 
