@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from torch.cuda.amp import custom_bwd, custom_fwd
+from torch.amp import custom_bwd, custom_fwd
 
 from models.modules import AdaGN, LinearAttention, SE3d, Swish
 from third_party.openpoints.models.layers import (
@@ -103,11 +103,11 @@ class BallQuery(nn.Module):
         self.num_neighbors = num_neighbors
         self.include_coordinates = include_coordinates
 
-    @custom_bwd
+    @custom_bwd(device_type='cuda')
     def backward(self, *args, **kwargs):
         return super().backward(*args, **kwargs)
 
-    @custom_fwd(cast_inputs=torch.float32)
+    @custom_fwd(cast_inputs=torch.float32, device_type='cuda')
     def forward(self, points_coords: Tensor, centers_coords: Tensor, points_features: Optional[Tensor] = None):
         # input: BCN, BCN
         # neighbor_features: B,D(+3),Ncenter

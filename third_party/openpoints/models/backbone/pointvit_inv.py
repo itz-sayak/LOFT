@@ -10,7 +10,7 @@ from typing import List
 
 import torch
 import torch.nn as nn
-from torch.cuda.amp import custom_bwd, custom_fwd
+from torch.amp import custom_bwd, custom_fwd
 
 from ..build import MODELS, build_model_from_cfg
 from ..layers import (
@@ -30,7 +30,7 @@ use_inv = True
 
 class RevBackProp(torch.autograd.Function):
     @staticmethod
-    @custom_fwd
+    @custom_fwd(device_type='cuda')
     def forward(ctx, x, blocks, pos_embed=None, alpha=0.0, lambd=1.0, num_cached=0):
         # print('during rev, alpha, lambda:', alpha, lambd) # TODO: DEBUG
 
@@ -72,7 +72,7 @@ class RevBackProp(torch.autograd.Function):
         return x
 
     @staticmethod
-    @custom_bwd
+    @custom_bwd(device_type='cuda')
     def backward(ctx, dy):  # pragma: no cover
         # retrieve params from ctx for backward
         Y, pos_embed, *intermediate = ctx.saved_tensors

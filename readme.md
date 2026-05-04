@@ -1,181 +1,145 @@
 <p align="center">
-
-  <h1 align="center">P2P-Bridge: Diffusion Bridges for 3D Point Cloud Denoising</h1>
+  <h1 align="center">Semantics Know the Shape: Latent-Conditioned Flow Matching for 3D Point Cloud Denoising</h1>
   <p align="center">
-    <a href="https://matvogel.github.io">Mathias Vogel</a><sup>1</sup>
-    <br>
-    <a href="https://scholar.google.com/citations?user=ml3laqEAAAAJ">Keisuke Tateno</a><sup>2</sup>,
-    <a href="https://inf.ethz.ch/people/person-detail.pollefeys.html">Marc Pollefeys</a><sup>1,3</sup>,
-    <a href="https://federicotombari.github.io/">Federico Tombari</a><sup>2,4</sup>,
-    <a href="https://scholar.google.com/citations?user=eQ0om98AAAAJ">Marie-Julie Rakotosaona</a><sup>*2</sup>
-    <a href="https://francisengelmann.github.io/">Francis Engelmann</a><sup>*1,2</sup>,
-    <br>
-    <sup>1</sup>ETH Zurich, 
-    <sup>2</sup>Google, 
-    <sup>3</sup>Microsoft,
-    <sup>4</sup>TUM,
-    <br>
-    <sup>*</sup>Equal Contribution
+    <strong>LOFT — Latent-Guided Optimal Flow Transport</strong>
   </p>
-  <h2 align="center">ECCV 2024</h2>
-  <h3 align="center"><a href="./assets/P2P-Bridge.pdf">📚Paper</a> | <a href="https://github.com/matvogel/P2P-Bridge">💾Code</a> </h3>
-  <div align="center"></div>
-</p>
-<p align="center">
-  <a href="">
-    <img src="./assets/overview.png " width="100%">
-  </a>
 </p>
 
-<br>
+---
 
-**P2P-Bridge**  introduces a novel approach for point cloud denoising by adapting Diffusion Schrödinger bridges to learn an optimal transport plan between paired point sets. Further enhancements are possible by incorporating additional features such as RGB data and point-wise DINOV2 features.
+## Overview
 
-## ⚙️ Requirements
-The code was tested using Python 3.10 and CUDA 11.8 on Ubuntu 22.04 and WSL2. Due to compatibility with older methods, there are quite a few dependencies, but we tried to make installation easier by providing a script and accumulating CUDA code as much as possible.
+LOFT is a latent-conditioned flow matching framework for 3D point cloud denoising. It combines Optimal Transport Conditional Flow Matching (OT-CFM) with a semantic latent conditioning pipeline: a frozen SemanticAutoencoder extracts geometric latent tokens from noisy input, a trainable FreqEncodingTransformer refines them at each timestep, and these tokens are injected into the PVCNN2Unet denoising backbone via cross-attention at five architectural levels. The result is a velocity field that transports noisy point patches to clean geometry via a straight-line OT-optimal trajectory.
 
-First, create a new environment (we use [conda](https://conda.io/projects/conda/en/latest/index.html)) and install the dependencies using the following commands:
+**Paper:** *Semantics Know the Shape: Latent-Conditioned Flow Matching for 3D Point Cloud Denoising*
+
+---
+
+## Requirements
+
+Tested with Python 3.10, PyTorch 2.5.1+cu121, CUDA 12.1, Ubuntu 22.04, RTX 4090 24 GB.
+
+Create a conda environment:
 
 ```bash
-conda create -n p2pb python=3.10
-conda activate p2pb
+conda create -n loft python=3.10
+conda activate loft
 ```
-We recommend to first install ``torch`` and ``torchvision`` using the following command:
-```bash
-conda install pytorch==2.1.2 torchvision==0.16.2 pytorch-cuda=11.8 -c pytorch -c nvidia --yes
-```
-followed by the installation of [Pytorch3D](https://github.com/facebookresearch/pytorch3d/blob/main/INSTALL.md) and [TorchCluster](https://github.com/rusty1s/pytorch_cluster).
 
-Finally, install all other dependencies and compile the custom CUDA code using the following command:
+Install PyTorch:
+
+```bash
+conda install pytorch==2.5.1 torchvision pytorch-cuda=12.1 -c pytorch -c nvidia --yes
+```
+
+Install all other dependencies and compile custom CUDA extensions:
 
 ```bash
 sh install.sh
-```	
+```
 
+---
 
-## 🗂️ Data Preparation
-### ⚙️ Requirements
-For data preparation, additional libraries are used. The requirements can be installed using the following command from the `data` directory:
+## Data Preparation
+
+Download the PUNet dataset meshes and place them under `data/`:
+
+```
+data/
+  10000_poisson/
+  30000_poisson/
+  50000_poisson/
+```
+
+The data directory path is configured in `configs/PVDS_PUNet_latent.yaml` under `data.data_dir`.
+
+---
+
+## Training
 
 ```bash
-pip install -r requirements_data.txt
+python train.py --config configs/PVDS_PUNet_latent.yaml
 ```
 
-### 🧸 Object Datasets (PU-Net and PC-Net)
-Download both zip files from [ScoreDenoise](https://github.com/luost26/score-denoise).
-Extract them into `data/objects` such that the folder structure looks as follows:
-```bash
-data/objects
-├── examples
-├── PCNet
-├── PUNet
-```	
+Checkpoints are saved to `checkpoints/otcfm_latent/` every 25,000 steps. Training runs for 450,000 steps at batch size 32 (~1.1 s/step on RTX 4090, ~10.1 GB VRAM).
 
-### 🏠 Indoor Scene Datasets
-To prepare the indoor scene datasets, follow the instructions [here](data/readme.md).
+Key config options in `configs/PVDS_PUNet_latent.yaml`:
 
-## 🚀 Training
-We use [wandb](https://wandb.ai/site) to track the training process. To use wandb run
+| Option | Default | Description |
+|--------|---------|-------------|
+| `model.ae_ckpt` | path to `ae_epoch_675.pth` | Frozen SemanticAE checkpoint |
+| `diffusion.latent_loss_weight` | 0.3 | Weight for cosine latent consistency loss |
+| `training.bs` | 32 | Batch size |
+| `diffusion.sampling_timesteps` | 10 | Euler ODE steps at inference |
 
-```bash
-wandb init
-```
+---
 
-in the terminal to log into your account (you will be asked for your API key). If you want to disable it, just run
-    
-```bash
-wandb disabled
-```
-before running the training script.
-
-To train a model, adjust the `config` file in the `configs` directory according to your data directory and run the following command:
+## Evaluation
 
 ```bash
-python train.py --config <CONFIG FILE> --save_dir <SAVE DIRECTORY> --wandb_project <WANDB PROJECT NAME> --wandb_entity <WANDB ENTITY NAME>
+python denoise_object.py --config configs/PVDS_PUNet_latent.yaml --model_path checkpoints/otcfm_latent/ckpt_best.pth
+python evaluate_objects.py
 ```
 
-For all available arguments, run
+---
+
+## Architecture
+
+See [architecture.md](architecture.md) for a full description of every component and its data flow, suitable for building block diagrams.
+
+**Parameter summary:**
+
+| Component | Parameters | Status |
+|-----------|----------:|--------|
+| SemanticAutoencoder | 5,985,653 | Frozen |
+| PVCNN2Unet backbone | ~19.4M | Trainable (lr = 3×10⁻⁴) |
+| LatentWriteAttention (×5) | ~1.07M | Trainable (lr = 9×10⁻⁴) |
+| FreqEncodingTransformer | 17,389,184 | Trainable (lr = 9×10⁻⁴) |
+| **Total trainable** | **~37.9M** | |
+
+---
+
+## Repository Structure
+
+```
+configs/          Training configs (use PVDS_PUNet_latent.yaml for LOFT)
+models/
+  autoencoder.py          SemanticAutoencoder (frozen AE)
+  freq_encoding_transformer.py  FreqEncodingTransformer
+  flow_bridge.py          OTFlowBridge + LatentOTFlowBridge
+  unet_pvc.py             PVCNN2Unet + LatentWriteAttention
+  model_loader.py         Model instantiation + per-param-group optimizer
+dataloaders/      Dataset loaders
+metrics/          Chamfer Distance, EMD evaluation
+third_party/      PVCNN, OpenPoints libraries
+architecture.md   Full architecture description for block diagram
+```
+
+---
+
+## Acknowledgements
+
+This work builds on [P2P-Bridge](https://github.com/matvogel/P2P-Bridge) (Vogel et al., ECCV 2024) and the PVCNN architecture. The SemanticAutoencoder and FreqEncodingTransformer are adapted from latent DDPM prior work.
+
+## Recent changes (2026-05-03)
+
+- `latent_film` explicitly disabled for ScanNet++ in `configs/PVDL_SNPP_latent.yaml` (`latent_film: false`).
+  - Reason: avoids train/inference mismatch when using AE FiLM with noisy real-scene inputs.
+  - PUNet latent config continues to use `latent_film: true` for upsampling tasks.
+
+## Applying the change (restart note)
+
+If a ScanNet++ training process is already running it will continue using the config that was loaded at start. To apply the `latent_film: false` change:
 
 ```bash
-python train.py --help
-```
-which will also show you how to train using multiple GPUs.
+# attach to the otcfm screen and stop the process safely
+screen -r otcfm
+# inside screen: Ctrl-C to stop the job, or exit the training loop cleanly
 
-## 📦 Pretrained Models
-Pretrained models can be downloaded from [here](https://drive.google.com/drive/folders/1hkd_gTU2EAMFJmgUzHmifviKDVunb6aK?usp=sharing). Extract the files into the `pretrained` directory such that the folder structure looks as follows:
-
-```bash
-pretrained
-├── PVDL_ARK_XYZ/
-│   ├── opt.yaml
-│   └── step_100000.pth
-└── ...
+# then restart with the updated config
+conda activate deepfill
+cd /mnt/zone/B/NEW/P2P-Bridge-OT-real-latent
+CUDA_VISIBLE_DEVICES=1 PYTHONUNBUFFERED=1 python -u train.py --config configs/PVDL_SNPP_latent.yaml 2>&1 | tee logs/train_snpp_latent.log
 ```
 
-## 📊 Evaluation
-### 🧸 PU-Net and PC-Net
-To run an evaluation on the PU-Net and PC-Net test data, run the following two commands to reproduce our paper results. The commands first run the denoising on the test data, followed by metrics calculation.
-
-```bash
-python evaluate_objects.py --model_path ./pretrained/PVDS_PUNet/latest.pth --dataset PUNet
-python evaluate_objects.py --model_path ./pretrained/PVDS_PUNet/latest.pth --dataset PCNet
-```
-The outputs are stored in `output_objects/<dataset>` together with the metrics. The output folder can be changed using the `--output_root` argument. For all available arguments, run
-
-```bash
-python evaluate_objects.py --help
-```
-
-### 🏠 Indoor Scenes
-To reproduce results on the indoor scenes dataset, we provide the following instructions for ScanNet++. The ARKitScenes dataset can be evaluated in the same way.
-
-#### 1. **Denoising:**
-To denoise rooms from our ScanNet++ test set, you need to have the rooms specified in `splits/snpp_test.txt` preprocessed (see [here](data/readme.md)). For automatic evaluation, copy all `snpp_test` scenes into a separate folder called `snpp_evaluation`. Then you can use our script to denoise all test rooms:
-
-```bash
-sh scripts/denoise_snpp.sh <PATH TO snpp_evaluation>
-```
-
-#### 2. **Evaluation:**
-To evaluate the denoised rooms, run the following command:
-```bash
-python evaluate_rooms.py --data_root <PATH TO snpp_evaluation> --dataset snpp
-```
-
-This will calculate the metrics for all prediction files and generate a `csv` file in the `predictions` folder inside `snpp_evaluation`. Note that the commands above use our coordinate only model by default. If you want to evaluate the models using RGB and DINOV2 features, use the RGB or RGB_DINO checkpoints by providing the corresponding weigths in the `--model_path` argument.
-
-## 🧩 Denoise Your Own Data
-### 🎥 Example
-
-![room-denoise](./assets/room-denoise.gif)
-
-### 🏠 Real-World Data (Indoor Scenes)
-To denoise real-world data such as indoor scenes, you can use the following command:
-
-```bash
-python denoise_room.py --room_path <ROOM PATH> --model_path <MODEL PATH> --out_path <OUTPUT PATH>
-```
-
-If you want to use precalculated features use the `--feature_name` argument. For all available arguments, run
-
-```bash
-python denoise_room.py --help
-```
-
-### 🧸 Synthetic Data (Objects)
-
-To denoise synthetic data, you can use the following command:
-
-```bash
-python denoise_object.py --data_path <PATH TO XYZ FILE> --save_path <OUTPUT FILE> --model_path <MODEL PATH>   
-```
-
-## BibTeX
-```
-@inproceedings{vogel2024p2pbridgediffusionbridges3d,
-      title={P2P-Bridge: Diffusion Bridges for 3D Point Cloud Denoising}, 
-      author={Mathias Vogel and Keisuke Tateno and Marc Pollefeys and Federico Tombari and Marie-Julie Rakotosaona and Francis Engelmann},
-      year={2024},
-      booktitle={European Conference on Computer Vision (ECCV)},
-}
-```
+Logs are written to `logs/` and checkpoints to `checkpoints/` as configured.

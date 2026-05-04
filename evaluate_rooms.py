@@ -36,6 +36,7 @@ def get_mectrics(args: DictConfig, gt: ArrayLike, pred: ArrayLike, gt_mesh: Opti
     """
 
     gt = torch.tensor(gt).float().cuda()
+    pred = torch.tensor(pred).float().cuda()
 
     data = {}
 
@@ -79,7 +80,6 @@ def calculate_model_metrics(data: Dict, model_name: str, args: DictConfig) -> Di
     """
     faro = data["faro"]
     faro_mesh = data["faro_mesh"]
-    segments = data["segments"]
 
     model_data = data["models"][model_name]
     model_metrics = {}
@@ -91,7 +91,7 @@ def calculate_model_metrics(data: Dict, model_name: str, args: DictConfig) -> Di
         pbar.set_description_str("Calculating metrics for %s" % model_config)
         pred = model_data[model_config]
         model_metrics[model_config] = {}
-        metrics_data = get_mectrics(args, faro, pred, gt_mesh=faro_mesh, segments=segments)
+        metrics_data = get_mectrics(args, faro, pred, gt_mesh=faro_mesh)
         logger.info(metrics_data)
         model_metrics[model_config] = metrics_data
 

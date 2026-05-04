@@ -113,7 +113,7 @@ def evaluate(
 
     accum_iter = cfg.sampling.accum_iter if "accum_iter" in cfg.sampling else 1
 
-    for idx, eval_data in enumerate(val_loader):
+    for idx, eval_data in enumerate(tqdm(val_loader, desc="Eval", total=accum_iter, leave=False)):
         data_batch = get_data_batch(batch=eval_data, cfg=cfg)
         x_gt = data_batch["x_gt"]
         x_cond = data_batch["x_cond"]
@@ -192,8 +192,6 @@ def evaluate(
         batch_metrics["emd_cond"] = emd_cond
         batch_metrics["mse_cond"] = eval_loss_cond
 
-    logger.info(batch_metrics)
-
     if not sampling:
         wandb.log(batch_metrics, step=step)
         log_wandb("pred", out_dir, step)
@@ -233,7 +231,6 @@ def get_metrics(
 
     if fast:
         cd = np.mean(calculate_cd_cuda(pred, gt)) * 1000
-        eval_loss = np.mean(model.loss(pred, gt).cpu().numpy()) if model is not None else 0
         emd = np.mean(calculate_emd_cuda(pred, gt)) * 1000
     else:
         # make sure that pred and gt are divisable by 128
@@ -247,8 +244,9 @@ def get_metrics(
         pred = pred.transpose(1, 2).contiguous()
 
         cd = np.mean(calculate_cd(pred, gt)) * 1000
-        eval_loss = np.mean(model.loss(pred, gt).detach().cpu().numpy()) if model is not None else 0
         emd = np.mean(calculate_emd_exact_cuda(pred, gt)) * 1000
+    # MSE (index-aligned) is not a valid point cloud metric — omitted.
+    eval_loss = 0.0
     return cd, emd, eval_loss
 
 

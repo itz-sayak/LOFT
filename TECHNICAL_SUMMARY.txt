@@ -1,0 +1,444 @@
+
+LATENT-CONDITIONED OT-CFM FOR POINT CLOUD DENOISING
+=====================================================
+Date: April 2026
+Environment: Python 3.10, PyTorch 2.5.1+cu121, CUDA 12.1, conda env deepfill
+Hardware: NVIDIA RTX 4090 24 GB
+
+1. OVERVIEW
+-----------
+We replace the Diffusion Schrödinger Bridge in P2P-Bridge (ECCV 2024) with
+Optimal Transport Conditional Flow Matching (OT-CFM) [Tong et al., 2023] and
+augment it with a learned latent conditioning pathway. The base bridge
+formulation is a deterministic ODE whose vector field is parameterized by a
+PVCNN2Unet backbone. The extended model introduces a frozen SemanticAutoencoder
+and a trainable FreqEncodingTransformer that produce timestep-conditioned latent
+tokens, injected into the backbone via multi-level cross-attention.
+
+2. BASE OT-CFM FORMULATION
+---------------------------
+Given a noisy patch x0 in R^{3 x N} and a clean patch x1 in R^{3 x N}, the
+training objective follows the OT-CFM framework:
+
+  (i)  Point-level OT coupling. For each sample in the batch the N x N
+       squared-L2 cost matrix between x0 and x1 is solved exactly via the
+       Hungarian algorithm (scipy linear_sum_assignment). x1's points are
+       permuted to minimize transport cost to x0. Object-level pairing is
+       preserved; only the within-sample point ordering changes.
+
+  (ii) Linear interpolation. The interpolated state is:
+         x_t = (1 - t) * x0 + t * x1_reordered + sigma_min * eps
+       where t ~ Uniform(0,1), eps ~ N(0,I), sigma_min = 1e-4.
+
+  (iii) Velocity regression. The backbone v_theta predicts the constant
+        target field (x1_reordered - x0) from (x_t, t, x0) via MSE.
+
+  (iv) Inference. The ODE dx/dt = v_theta(x_t, t, x0) is integrated with
+       the Euler method using 10 function evaluations. OT coupling is not
+       performed at inference; x0 = x_start throughout.
+
+OT regularization: ot_reg = 0.14 (minimum stable value at B=32 verified over
+50 PUNet batches; tighter values cause Sinkhorn non-convergence). Timestep
+scale: 1000. EMA decay: 0.999.
+
+3. BACKBONE
+-----------
+PVCNN2Unet with channels [32, 64, 128, 256, 512], time_embed_dim = 64,
+out_mlp = 128, voxel resolutions [32, 16, 8, 8]. In the base model,
+extra_feature_channels = 3 so that x0 is concatenated as conditioning input.
+Trainable parameters: 20,457,059.
+
+4. LATENT CONDITIONING EXTENSION
+---------------------------------
+The raw concatenation conditioning is replaced with a three-stage learned
+pathway in LatentOTFlowBridge:
+
+  Stage 1 — Frozen SemanticAutoencoder (AE).
+    Input:  x0 in R^{B x 3 x N}
+    Output: Z in R^{B x 64 x 512}
+    Architecture: PointNet++ encoder (SA at 1024, 256, 64 points) with
+    OffsetAttention, CrossAttention skip connections, and SE blocks.
+    Decoder: three FeaturePropagation levels with final MLP head.
+    AE parameters: 5,985,653 (all frozen, zero trainable during
+    diffusion training).
+    Checkpoint: checkpoints_ae_retrain_v3/ae_epoch_675.pth.
+    The AE was trained with a joint objective:
+      L_AE = clean_recon + denoise_recon + 0.05 * latent_consistency
+              + 1e-4 * latent_l2
+    where latent_consistency = ||z_noisy - z_clean.detach()||^2 enforces
+    noise-invariance in the latent space, and denoise_recon minimizes
+    reconstruction error from noisy input to clean target.
+
+  Stage 2 — Trainable FreqEncodingTransformer.
+    Input:  Z in R^{B x 64 x 512}, scalar t in R^B
+    Output: Z' in R^{B x 64 x 512}
+    Architecture: FourierFreqEncoding (6 frequency bands, learnable) ->
+    4 x (TransformerEncoderLayer [8 heads, FF mult 4] + TimestepFiLM) ->
+    LayerNorm. TimestepFiLM conditions each transformer layer on the
+    current CFM timestep via learned scale and shift.
+    Parameters: 17,389,184 (all trainable).
+
+  Stage 3 — LatentWriteAttention (cross-attention injection).
+    The N backbone spatial features (query) attend to the M=64 latent
+    tokens (key, value) via standard scaled dot-product cross-attention:
+      h' = h + CrossAttn(Q=h, K=Z', V=Z')
+    Applied at (a) the feature embed level and (b) each of the 4
+    FeaturePropagation decoder levels via a ModuleList (fp_write_attns).
+    to_out is initialized xavier_uniform(gain=0.5) to keep the residual
+    near identity at training onset. Parameters within backbone: 1,066,144.
+    A global FiLM pathway pools Z' -> linear -> AdaGN scale/shift
+    (film_cond_dim = 512, latent_film = true).
+    extra_feature_channels = 0; no concatenation conditioning.
+
+  Auxiliary loss. A latent consistency term is added to the training loss:
+    L = L_CFM + 0.3 * (1 - cosine_sim(mean(Z'), mean(Z_clean)).mean())
+  where Z_clean = AE(x1). This aligns the noisy conditioning tokens with
+  the clean geometry across timesteps.
+
+5. PARAMETER SUMMARY
+---------------------
+  SemanticAE (frozen):        5,985,653   trainable: 0
+  PVCNN2Unet backbone:       20,457,059   trainable: 20,457,059
+    of which write_attn:      1,066,144
+  FreqEncodingTransformer:   17,389,184   trainable: 17,389,184
+  Total trainable:           37,846,243
+
+6. TRAINING SETUP
+-----------------
+  Backbone init:    step_200000.pth (existing OT-CFM checkpoint)
+  Latent layers:    fresh initialization
+  Optimizer:        AdamW, lr = 3e-4 (backbone), lr = 9e-4 (FreqTransformer
+                    and write_attn), weight_decay = 1e-5
+  Scheduler:        constant lr
+  Batch size:       32
+  AMP:              enabled (bfloat16/float16 mixed)
+  Gradient clip:    1.0
+  Save interval:    every 25,000 steps
+  Config:           configs/PVDS_PUNet_latent.yaml
+
+7. RUNTIME
+----------
+  GPU memory (B=32): ~10.1 GB on RTX 4090 24 GB
+  Step time:         ~1.1 s/step
+    OT coupling:     ~870 ms  (Hungarian, CPU, parallelized over batch)
+    Backbone fwd:    ~56 ms
+    Backward:        ~121 ms
+
+8. WHY A DETERMINISTIC AE OVER A VAE
+--------------------------------------
+A VAE would impose KL(q(z|x) || N(0,I)) over all 64 x 512 latent dimensions.
+The SemanticAE training already includes the latent_consistency term
+||z_noisy - z_clean||^2, which achieves the invariance property that KL
+targets but does so geometrically — it aligns noisy and clean encodings
+directly rather than mapping both to an uninformed Gaussian prior. The KL
+penalty additionally destroys discriminative structure in Z that the
+FreqEncodingTransformer and LatentWriteAttention modules rely on for precise
+per-point modulation. A VAE-conditioned backbone would receive a lower-capacity
+conditioning signal at every decoder level, increasing CD and EMD. At inference
+the reparameterization sampling adds noise to Z while the mean-only path
+recovers a deterministic AE, negating the KL cost paid during training. The
+deterministic SemanticAE is therefore strictly preferable for conditioning-only
+use in a denoising framework.
+
+=======================================================================
+Date: May 2026
+Environment: conda deepfill, Python 3.10, PyTorch 2.x, CUDA
+Working directory: /mnt/zone/B/NEW/P2P-Bridge-OT-real-latent
+
+NOTE: This is the active LOFT source directory (Latent OT-CFM).
+The base OT-CFM without latent conditioning is in P2P-Bridge-OT-real.
+The DDPM-based latent model is in P2B_latent_DDPM.
+
+OVERVIEW
+--------
+This directory contains the LOFT (Latent Optimal Flow Transformer) model for real
+indoor scene point cloud denoising on ScanNet++. It extends P2P-Bridge-OT-real by
+adding latent conditioning via a frozen SemanticAutoencoder and a trainable
+FreqEncodingTransformer. The bridge formulation is OT-CFM (Euler ODE), not DDPM.
+
+ARCHITECTURE
+------------
+The model class is LatentOTFlowBridge (models/flow_bridge.py). It inherits from
+OTFlowBridge and adds:
+  - Frozen SemanticAutoencoder: encodes noisy xyz [B, 3, N] -> AE latent [B, 64, 512]
+    (5,985,653 params, ALL frozen, 0 trainable)
+  - Trainable FreqEncodingTransformer: refines AE latents with timestep conditioning
+    [B, 64, 512] + t -> Z [B, 64, 512] (17,389,184 params, all trainable)
+  - PVCNN2Unet backbone: predicts velocity field from x_t [B, 3, N] + Z
+    (104,899,587 total params including write_attn cross-attention layers)
+
+The AE checkpoint used is:
+  /mnt/zone/A/P2B_latent_DDPM/checkpoints_ae_snpp_real/ae_best_clean_cd.pth
+
+TRAINING PROTOCOL (OT-CFM)
+---------------------------
+  1. Point-level OT coupling (Hungarian algorithm, N*N per sample) reorders x1's
+     points to minimize pairwise squared-L2 transport cost from x0.
+     Object-level pairing is preserved.
+  2. Linear interpolation: x_t = (1-t)*x0 + t*x1_reordered + sigma_min*eps, t~U(0,1)
+  3. Velocity MSE loss: MSE(v_pred, x1_reordered - x0) (constant target field)
+  4. AE encodes noisy x0 -> FreqTransformer(t) -> Z -> injected via write_attn
+
+No DDPM schedule, no noise schedule, no latent consistency loss.
+
+INFERENCE (Euler ODE)
+----------------------
+  For i in range(nfe=10):
+    Z = FreqTransformer(AE(x_start), t=i/nfe)
+    v = PVCNN2Unet(x_t, t*1000, x_cond=Z)
+    x_t += v * (1/nfe)
+
+AE encoding is done ONCE at inference start and reused across all steps.
+
+CHECKPOINT DIRECTORY STRUCTURE
+--------------------------------
+checkpoints/
+  PVDL_SNPP_latent/            <- Main ScanNet++ latent OT-CFM run
+    opt.yaml                   <- Training config snapshot
+    PVDL_SNPP_latent/          <- Output subdir
+      step_200000.pth          <- Trained checkpoint at 200k steps (EMA + model)
+  snpp_latent_otcfm_gpu0/      <- Earlier SNPP latent run (up to 30k steps)
+    step_10000.pth
+    step_20000.pth
+    step_30000.pth
+  otcfm_latent/                <- PUNet latent OT-CFM run
+    step_200000.pth
+  otcfm_pointot/               <- PUNet OT-CFM with pointOT variant
+    step_200000.pth
+
+KEY CONFIGURATION
+-----------------
+Config: configs/PVDL_SNPP_latent.yaml
+  bridge_type: latent_otcfm
+  dataset: ScanNetPP
+  point_features: dino           (DINO passed as x_cond, NOT concatenated to backbone input)
+  ae_ckpt: /mnt/zone/A/P2B_latent_DDPM/checkpoints_ae_snpp_real/ae_best_clean_cd.pth
+  data_dir: /mnt/zone/A/P2B_latent_DDPM/snpp_real_processed_iphone_dino_500k
+  features_root: /mnt/zone/A/P2B_latent_DDPM/snpp_real_dino_processed
+  lr: 1e-4, AdamW, CosineAnnealingLR T_max=200000
+  bs: 4, steps: 200000
+
+PARAMETER SUMMARY
+------------------
+  PVCNN2Unet backbone:    104,899,587 total / 104,899,587 trainable
+  write_attn layers:        3,713,664 (part of backbone, trainable)
+  FreqEncodingTransformer: 17,389,184 (trainable)
+  SemanticAutoencoder:      5,985,653 (FROZEN, 0 trainable)
+
+EVALUATION RESULTS (ScanNet++, 4-scene subset, iphone_dino.ply 500k pts)
+--------------------------------------------------------------------------
+Scenes: 7bc286c1b6, 5748ce6f01, a24f64f7fb, bcd2436daf
+Checkpoint: PVDL_SNPP_latent/PVDL_SNPP_latent/step_200000.pth (EMA), steps=10
+
+  Model              point_dist   face_dist   cd_pred_gt   cd_gt_pred
+  P2P original         23.111       1.774       23.132        1.934
+  P2B_latent_DDPM      21.802       2.159       21.824        2.333
+  LOFT (this repo)     21.482       2.114       21.503        2.285
+
+Lower is better (Chamfer distance variants).
+
+KEY DIFFERENCES FROM P2P-Bridge-OT-real (BASE)
+------------------------------------------------
+  Added: LatentOTFlowBridge in models/flow_bridge.py
+  Added: models/autoencoder.py, freq_encoding_transformer.py, p2pb_latent.py,
+         p2pb_latent_dino.py, Transformers/
+  Updated: models/model_loader.py — bridge_type "latent_otcfm" dispatch,
+           FreqTransformer checkpoint loading
+  Updated: denoise_room.py — P2B_latent_DDPM version with DINO loading
+  Added:   configs/PVDL_SNPP_latent.yaml
+
+KEY DIFFERENCES FROM P2B_latent_DDPM (DDPM LATENT)
+----------------------------------------------------
+  Bridge: OT-CFM Euler ODE (10 steps) instead of DDPM
+  Training: velocity MSE instead of noise/x0/v prediction
+  OT coupling: point-level Hungarian (N*N) at every training step
+  DINO: passed as x_cond (cross-attention) not concatenated to input
+  Backbone input: [B, 3, N] only (not [B, 387, N])
+  No latent consistency loss; faster inference
+
+RECENT CHANGES (2026-05-03)
+---------------------------
+- Explicitly disabled `latent_film` for ScanNet++ in `configs/PVDL_SNPP_latent.yaml` (`latent_film: false`).
+  Reason: avoided train/inference mismatch when using AE FiLM with noisy real-scene inputs;
+  ScanNet++ uses AE latent via cross-attention + DINO per-point conditioning instead.
+
+- Kept `latent_film: true` for the PUNet latent config (upsampling branch) where
+  the sparse-input AE latent is a reliable conditioning signal.
+
+APPLYING CHANGES / RESTART PROCEDURE
+-----------------------------------
+If a training process is already running, the on-disk config change will not affect it.
+To apply `latent_film: false` for the current ScanNet++ run, restart the training job:
+
+  1. Stop the running processes (in `screen -S otcfm`):
+     - Attach: `screen -r otcfm` (or `screen -x otcfm`)
+     - Stop: send Ctrl-C or `pkill -f "train.py --config configs/PVDL_SNPP_latent.yaml"` carefully.
+  2. Confirm `configs/PVDL_SNPP_latent.yaml` contains `latent_film: false` (already set).
+  3. Restart: in the repo root run:
+
+     ```bash
+     conda activate deepfill
+     cd /mnt/zone/B/NEW/P2P-Bridge-OT-real-latent
+     CUDA_VISIBLE_DEVICES=1 PYTHONUNBUFFERED=1 python -u train.py --config configs/PVDL_SNPP_latent.yaml 2>&1 | tee logs/train_snpp_latent.log
+     ```
+
+  4. The run will resume saving checkpoints to `checkpoints/PVDL_SNPP_latent/...` and
+     will use `save_interval: 10000` as configured. To resume from an existing checkpoint,
+     pass `--model_path checkpoints/PVDL_SNPP_latent/PVDL_SNPP_latent/step_200000.pth`.
+
+PUNET VS SCANNET++ IMPLEMENTATION COMPARISON
+----------------------------------------------
+This repository contains latent OT-CFM implementations for TWO distinct datasets and use cases.
+Both share the same core LatentOTFlowBridge architecture but differ significantly in configuration,
+data handling, and conditioning strategy.
+
+DATASET AND USE CASE
+  PUNet (Synthetic Denoising):
+    - Input: sparse point clouds (10k, 30k, 50k points) with added noise
+    - Task: denoise in-place (point-to-point, same cardinality, no upsampling)
+    - Distribution: clean synthetic meshes (shapes from ModelNet, ShapeNet)
+    - Noise: uniform Gaussian in [-0.02, 0.02] range, well-behaved
+    - Config file: configs/PVDS_PUNet_latent.yaml
+    - Data dir: data/10000_poisson, data/30000_poisson, data/50000_poisson
+    - Inference: extracts overlapping patches (patch_size=2048), denoises each locally,
+                 downsamples via FPS back to original point count
+
+  ScanNet++ (Real-World Denoising):
+    - Input: dense point clouds (500k points) captured from real indoor scenes
+    - Task: denoise in-place (real-to-real, no upsampling)
+    - Distribution: real iPhone RGB-D scan data (iphone*.ply format)
+    - Noise: real capture noise, sparse outliers, sensor errors (highly non-Gaussian)
+    - Config file: configs/PVDL_SNPP_latent.yaml
+    - Data dir: /mnt/zone/A/P2B_latent_DDPM/snpp_real_processed_iphone_dino_500k
+    - Features: DINO embeddings (384-dim) from pretrained vision model
+    - Inference: patch-based local denoising on dense scenes (room-level)
+
+AUTOENCODER CHECKPOINT PATHS
+  PUNet:
+    ae_ckpt: /mnt/zone/B/NEW/P2B_latent_DDPM/checkpoints_ae_retrain_v3/ae_epoch_675.pth
+    Training data: PUNet synthetic, sparse input (upsampling AE)
+    Role: encodes sparse-input geometry to dense latent
+
+  ScanNet++:
+    ae_ckpt: /mnt/zone/A/P2B_latent_DDPM/checkpoints_ae_snpp_real/ae_best_clean_cd.pth
+    Training data: ScanNet++ real scenes, dense input
+    Role: encodes dense real noisy geometry to latent tokens
+
+CONDITIONING STRATEGY
+  PUNet:
+    - Backbone input: [B, 3, N] (xyz only)
+    - Conditioning pipeline: AE(x0_noisy) [64, 512] -> FreqTransformer(t) [64, 512]
+                            -> LatentWriteAttention (cross-attn at 5 levels)
+    - FiLM module: latent_film = true (global AdaGN on backbone features)
+    - Extra features: DINO not used
+    - Rationale: sparse-input AE is reliable conditioning; FiLM amplifies semantic signal
+                for precise local denoising. Overlapping patch extraction provides
+                contextual information for point-to-point denoising.
+
+  ScanNet++:
+    - Backbone input: [B, 3, N] (xyz only)
+    - Conditioning pipeline: AE(x0_noisy) [64, 512] -> FreqTransformer(t) [64, 512]
+                            -> LatentWriteAttention (cross-attn at 5 levels)
+                            + DINO features (384-dim) concatenated to x0 BEFORE AE encoding
+    - FiLM module: latent_film = false (NO global AdaGN)
+    - Extra features: DINO per-point features (robust visual semantics from real photos)
+    - Rationale: dense real-scene AE encoding is already noisy; FiLM can amplify artifacts.
+                DINO provides visual semantic anchoring to real geometry. Cross-attention
+                + DINO per-point conditioning sufficient without FiLM.
+
+TRAINING CONFIGURATION SUMMARY
+  Parameter                    PUNet                      ScanNet++
+  ──────────────────────────   ─────────────────────     ──────────────────────
+  Config file                  PVDS_PUNet_latent.yaml    PVDL_SNPP_latent.yaml
+  Batch size                   32                        4
+  Learning rate                3e-4 (backbone),          1e-4 (all)
+                               9e-4 (latent/attn)        CosineAnnealingLR
+  Scheduler                    constant lr               T_max=250000 steps
+  Steps                        450,000                   250,000
+  Save interval                25,000 steps              10,000 steps
+  AE checkpoint path           checkpoints_ae_retrain    checkpoints_ae_snpp_real
+  OT regularization            0.14 (fixed)              0.14 (fixed)
+  Latent consistency loss      L_CFM + 0.3*cosine_sim   velocity MSE only
+  latent_film                  true                      false
+  Gradient clip                1.0                       1.0
+  EMA decay                    0.999                     0.999
+
+CHECKPOINT ORGANIZATION
+  PUNet latent run:
+    checkpoints/otcfm_latent/step_*.pth
+  ScanNet++ latent run:
+    checkpoints/PVDL_SNPP_latent/PVDL_SNPP_latent/step_*.pth
+    (stored with config snapshot opt.yaml)
+
+INFERENCE DIFFERENCES
+  PUNet:
+    - Input: sparse point cloud x_start [B, 3, N] (N = 10k, 30k, or 50k)
+    - Patch extraction: overlapping patches (2048 points each) via KNN around seed points
+    - AE encodes x_start once at loop start
+    - Z_t = FreqTransformer(Z, t) refined at each ODE step
+    - PVCNN2Unet uses FiLM modulation to boost semantic signal during local denoising
+    - Output: denoised point cloud [B, 3, N] (same cardinality as input, FPS downsampling
+              of overlapping patches back to original count)
+
+  ScanNet++:
+    - Input: dense point cloud x_start [B, 3, N] (N = 500k), possibly with DINO [B, 384, N]
+    - Patch extraction: overlapping patches from dense scenes (2048 points each)
+    - AE encodes x_start (optionally concatenated with DINO) once at loop start
+    - Z_t = FreqTransformer(Z, t) refined at each ODE step
+    - PVCNN2Unet uses cross-attention only (NO FiLM) for stable denoising
+    - Output: denoised dense point cloud [B, 3, N] (same cardinality as input)
+
+EXPECTED PERFORMANCE
+  PUNet (synthetic denoising):
+    - CD (Chamfer Distance) typically 0.001-0.005 range (synthetic clean data)
+    - Improvement over non-latent baseline: ~5-10%
+    - Strong FiLM conditioning helps recover precise geometry at low noise levels
+
+  ScanNet++ (real-world denoising):
+    - CD typically 20-25 range (real noise is high baseline)
+    - Improvement over P2P original: ~7-9%
+    - Relative improvement over P2B_latent_DDPM: ~1-2%
+    - Cross-attention + DINO provides stable denoising without FiLM artifacts
+
+END-TO-END DATA FLOW DIAGRAM
+  Both use LatentOTFlowBridge and patch-based local denoising, but with different scales:
+
+  PUNet flow (sparse, 10k-50k points):
+    x_start (sparse) -> [extract overlapping patches, K=2048]
+                          |
+                          +-> AE(noisy patch) -> Z_base -> FreqTransformer(t) -> Z_t
+                                                                                    |
+                          +-> PVCNN2Unet (x_t, t, FiLM(Z_t)) -> v_t -> denoised patch
+                          |
+                        [merge patches via FPS, back to original cardinality]
+                        
+    Output: x_denoised (same N as input)
+
+  ScanNet++ flow (dense, 500k points):
+    x_start (dense) + DINO (opt) -> [extract overlapping patches, K=2048]
+                                      |
+                                      +-> AE(noisy patch + DINO) -> Z_base -> FreqTransformer(t) -> Z_t
+                                                                                                      |
+                                      +-> PVCNN2Unet (x_t, t, CrossAttn(Z_t)) -> v_t -> denoised patch
+                                      |
+                                    [merge patches via FPS, back to original cardinality]
+    
+    Output: x_denoised (same N as input)
+
+NOTES
+-----
+- Both PUNet and ScanNet++ are DENOISING tasks (no point count change / upsampling).
+  Output cardinality = input cardinality (via FPS downsampling of overlapping patches).
+
+- This repo keeps PUNet and ScanNet++ branches separate in config decisions: PUNet uses
+  `latent_film: true` for synthetic sparse data, ScanNet++ uses `latent_film: false` for
+  real dense scenes and relies on AE cross-attention plus DINO per-point conditioning.
+
+- Switching between tasks: ensure you use the correct config file (PVDS_PUNet_latent.yaml
+  vs PVDL_SNPP_latent.yaml) and have the corresponding AE checkpoint available.
+
+- The latent_film decision is NOT arbitrary: FiLM amplifies semantic features from AE,
+  which is safe for sparse synthetic inputs but can amplify noise artifacts from dense
+  real scenes. ScanNet++ instead relies on DINO's robust visual features as primary
+  semantic anchor.
+

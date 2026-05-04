@@ -87,12 +87,20 @@ def get_dataloader(
             mode="training",
             additional_features=opt.data.point_features is not None,
             augment=opt.data.augment,
+            features_root=getattr(opt.data, "features_root", None),
+            feature_type=getattr(opt.data, "point_features", None),
+            train_split_path=getattr(opt.data, "train_split_path", None),
+            val_split_path=getattr(opt.data, "val_split_path", None),
         )
         test_dataset = ScanNetPP(
             root=opt.data.data_dir,
             mode="validation",
             additional_features=opt.data.point_features is not None,
             augment=opt.data.augment,
+            features_root=getattr(opt.data, "features_root", None),
+            feature_type=getattr(opt.data, "point_features", None),
+            train_split_path=getattr(opt.data, "train_split_path", None),
+            val_split_path=getattr(opt.data, "val_split_path", None),
         )
     elif opt.data.dataset == "PUNet":
         train_dataset = get_dataset(

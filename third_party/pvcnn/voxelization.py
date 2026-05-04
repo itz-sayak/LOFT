@@ -1,7 +1,7 @@
 import pvcnn.functional as F
 import torch
 import torch.nn as nn
-from torch.cuda.amp import custom_bwd, custom_fwd
+from torch.amp import custom_bwd, custom_fwd
 
 __all__ = ["Voxelization"]
 
@@ -13,11 +13,11 @@ class Voxelization(nn.Module):
         self.normalize = normalize
         self.eps = eps
 
-    @custom_bwd
+    @custom_bwd(device_type='cuda')
     def backward(self, *args, **kwargs):
         return super().backward(*args, **kwargs)
 
-    @custom_fwd(cast_inputs=torch.float32)
+    @custom_fwd(cast_inputs=torch.float32, device_type='cuda')
     def forward(self, features, coords):
         coords = coords.detach()
         norm_coords = coords - coords.mean(2, keepdim=True)

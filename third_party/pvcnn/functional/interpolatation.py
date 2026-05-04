@@ -3,14 +3,14 @@ import torch
 # from modules.functional.backend import _backend
 from pvcnn.functional.backend import _backend
 from torch.autograd import Function
-from torch.cuda.amp import custom_bwd, custom_fwd
+from torch.amp import custom_bwd, custom_fwd
 
 __all__ = ["nearest_neighbor_interpolate"]
 
 
 class NeighborInterpolation(Function):
     @staticmethod
-    @custom_fwd(cast_inputs=torch.float32)
+    @custom_fwd(cast_inputs=torch.float32, device_type='cuda')
     def forward(ctx, points_coords, centers_coords, centers_features):
         """
         :param ctx:
@@ -33,7 +33,7 @@ class NeighborInterpolation(Function):
         return points_features
 
     @staticmethod
-    @custom_bwd
+    @custom_bwd(device_type='cuda')
     def backward(ctx, grad_output):
         indices, weights = ctx.saved_tensors
         grad_centers_features = _backend.three_nearest_neighbors_interpolate_backward(

@@ -1,0 +1,162 @@
+# ============================================================
+#   Latent OT-CFM (LOFT) for Indoor Scenes — ScanNet++ (SNPP)
+#   Model: LatentOTFlowBridge  (AE latent + per-point DINO features)
+#
+#   Architecture: OT-CFM flow matching bridge with:
+#     - Frozen SemanticAutoencoder → FreqEncodingTransformer (global structure)
+#     - DINO features concatenated as extra input channels (per-point visual detail)
+#     - PVCNN2Unet backbone with write_attn cross-attention for conditioning injection
+#
+#   Data preparation (real SNPP):
+#     1) Raw data root: /mnt/zone/A/scannetpp_release_realtrain/data
+#     2) Per-scene DINO features (already extracted):
+#          /mnt/zone/A/P2B_latent_DDPM/snpp_real_dino_processed/<scene>/features/dino_iphone.npy
+#        (and scans/iphone_dino.ply written under each raw scene folder)
+#     3) Preprocess batches (NPZs w/ clean+noisy+idxs; features loaded on-the-fly):
+#          conda run -n deepfill python data/preprocess_batches.py \
+#            --data_root /mnt/zone/A/scannetpp_release_realtrain/data \
+#            --output_root /mnt/zone/A/P2B_latent_DDPM/snpp_real_processed_iphone_dino_500k \
+#            --feature_type none --use_iphone_dino_ply
+# ============================================================
+
+data:
+  data_dir: /mnt/zone/A/P2B_latent_DDPM/snpp_real_processed_iphone_dino_500k
+  features_root: /mnt/zone/A/P2B_latent_DDPM/snpp_real_dino_processed
+  dataset: ScanNetPP
+  point_features: dino         # DINO features — 384-dim per-point visual conditioning
+  use_rgb_features: false
+  unconditional: false
+  augment: true
+  workers: 4
+  npoints: 4096
+  train_split_path: splits/snpp_real_train.txt
+  val_split_path:   splits/snpp_real_val.txt
+
+diffusion:
+  bridge_type: otcfm            # dispatch: otcfm + model_type=latent_otcfm → LatentOTFlowBridge
+  ot_reg: 0.14
+  sigma_min: 1.0e-4
+  timesteps: 1000
+  sampling_timesteps: 10
+  cond_drop_prob: 0.1
+  latent_loss_weight: 0.3       # cosine(mean(Z), mean(AE(x1))) consistency loss
+  input_mask_prob: 0.0
+  objective: pred_v
+  schedule: linear
+  loss_type: mse
+  t0: 1.0e-4
+  T: 1.0
+  ot_ode: true
+
+# ------------------------------------------------------------
+#  Model: LatentOTFlowBridge
+#    - Frozen SemanticAutoencoder → FreqTransformer → WriteAttention (global structure)
+#    - DINO features (384-dim) concatenated as extra input channels (per-point detail)
+#    - Backbone input: [B, 387, N] = xyz (3) + DINO (384)
+#    - Mirrors P2B_latent_DDPM backbone exactly; only bridge differs (OT-CFM vs DDPM)
+# ------------------------------------------------------------
+model:
+  type: PVD
+  model_type: latent_otcfm      # dispatch key: otcfm + latent_otcfm → LatentOTFlowBridge
+  ema: true
+  in_dim: 3
+  out_dim: 3
+  time_embed_dim: 64
+  dropout: 0.15
+  ema_decay: 0.999
+
+  # ---- DINO feature settings ----
+  use_dino: false               # AE does NOT use DINO; DINO fed as extra input channels
+  dino_dim: 384
+  sem_dim: 128
+
+  # ---- Latent AE conditioning ----
+  use_cross_attn: true
+  use_offset_attn: true
+  latent_dim: 512
+  normal_head: true
+  ae_ckpt: /mnt/zone/A/P2B_latent_DDPM/checkpoints_ae_snpp_real/ae_best_clean_cd.pth
+
+  # FreqEncodingTransformer settings
+  feat_dim: 512
+  ae_num_tokens: 64
+  freq_num_freqs: 6
+  freq_num_layers: 4
+  freq_num_heads: 8
+  freq_ff_mult: 4
+  freq_dropout: 0.1
+  freq_out_dim: 512
+  freq_learnable: true
+
+  # PVCNN2Unet backbone settings — identical to P2B_latent_DDPM PVDL_SNPP_latent.yaml
+  PVD:
+    use_global_embedding: false
+    global_embedding_dim: 1024
+    feat_embed_dim: 512
+    film_cond_dim: 512
+    extra_feature_channels: 384  # DINO: 384-dim concatenated with xyz → [B, 387, N]
+    attention_type: linear
+    attention_heads: 8
+    latent_num_heads: 8
+    latent_film: false
+    fp_write_attn: true
+    feat_dropout_before_attn: 0.2
+    attentions:
+    - 0
+    - 0
+    - 0
+    - 1
+    channels:
+    - 64
+    - 128
+    - 256
+    - 512
+    - 1024
+    voxel_resolutions:
+    - 32
+    - 16
+    - 8
+    - 8
+    n_sa_blocks:
+    - 2
+    - 3
+    - 2
+    - 2
+    n_fp_blocks:
+    - 2
+    - 3
+    - 2
+    - 2
+    radius:
+    - 0.1
+    - 0.2
+    - 0.4
+    - 0.8
+    out_mlp: 256
+    grad_fusion_k: 16
+
+training:
+  optimizer:
+    type: AdamW
+    lr: 1.0e-4
+    beta1: 0.9
+    beta2: 0.999
+    weight_decay: 1.0e-5
+  scheduler:
+    type: CosineAnnealingLR
+    T_max: 200000
+    eta_min: 1.0e-6
+  grad_clip:
+    enabled: true
+    value: 1.0
+  bs: 4
+  amp: true
+  steps: 250000
+  accumulation_steps: 1
+  log_interval: 10
+  save_interval: 10000
+  viz_interval: 10000
+  seed: 42
+
+sampling:
+  bs: 4

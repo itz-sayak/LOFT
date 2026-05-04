@@ -3,7 +3,7 @@ import os
 import torch
 from torch import nn
 from torch.autograd import Function
-from torch.cuda.amp import custom_bwd, custom_fwd
+from torch.amp import custom_bwd, custom_fwd
 
 cur_path = os.path.dirname(os.path.abspath(__file__))
 build_path = cur_path.replace("chamfer3D", "tmp")
@@ -43,7 +43,7 @@ chamfer_3D = load(name="chamfer_3D",
 # GPU tensors only
 class chamfer_3DFunction(Function):
     @staticmethod
-    @custom_fwd(cast_inputs=torch.float32)
+    @custom_fwd(cast_inputs=torch.float32, device_type='cuda')
     def forward(ctx, xyz1, xyz2):
         batchsize, n, dim = xyz1.size()
         assert dim == 3, "Wrong last dimension for the chamfer distance 's input! Check with .size()"
@@ -70,7 +70,7 @@ class chamfer_3DFunction(Function):
         return dist1, dist2, idx1, idx2
 
     @staticmethod
-    @custom_bwd
+    @custom_bwd(device_type='cuda')
     def backward(ctx, graddist1, graddist2, gradidx1, gradidx2):
         xyz1, xyz2, idx1, idx2 = ctx.saved_tensors
         graddist1 = graddist1.contiguous()

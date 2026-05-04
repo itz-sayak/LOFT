@@ -1,11 +1,14 @@
 data:
-  data_dir: data/objects/
+  data_dir: /mnt/zone/B/NEW/P2B_latent_DDPM/data
   dataset: PUNet
   augment: true
   use_rgb_features: false
   workers: 4
   npoints: 2048
+  resolutions: ["10000_poisson", "30000_poisson", "50000_poisson"]
+  test_resolutions: ["10000_poisson", "30000_poisson", "50000_poisson"]
 diffusion:
+  bridge_type: otcfm
   timesteps: 1000
   sampling_timesteps: 10
   objective: pred_noise
@@ -17,11 +20,12 @@ diffusion:
   t0: 1.e-4
   T: 1.0
   ot_ode: true
+  ot_reg: 0.14
 model:
   type: PVD
   ema: true
   in_dim: 3
-  extra_feature_channels: 0
+  extra_feature_channels: 3
   out_dim: 3
   time_embed_dim: 64
   dropout: 0.15
@@ -75,7 +79,9 @@ training:
     weight_decay: 1.0e-05
   scheduler:
     type: constant
-    lr_gamma: 0.999
+    # lr_gamma: 0.999  # only used by ExponentialLR branch; unused with constant/cosine
+    warmup_steps: 0
+    cosine_start_step: 50000
   grad_clip:
     enabled: true
     value: 1.0
@@ -85,9 +91,11 @@ training:
   steps: 450_000
   accumulation_steps: 1
   log_interval: 10
-  save_interval: 10000
-  viz_interval: 10000
+  save_interval: 25000
+  viz_interval: 100
   seed: 42
 sampling:
   bs: 32
   num_iter: 8
+  accum_iter: 16
+use_ema: true

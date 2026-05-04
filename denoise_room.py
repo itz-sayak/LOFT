@@ -141,6 +141,7 @@ def denoise_patch_batch(
     patch -= center
 
     scale = np.linalg.norm(patch, axis=2, keepdims=True).max(axis=1, keepdims=True)
+    scale = np.maximum(scale, 1e-12)
     patch /= scale
 
     patch = torch.from_numpy(patch).float().cuda().transpose(1, 2)
@@ -156,7 +157,7 @@ def denoise_patch_batch(
     model_pred = model.sample(
         x_start=patch, x_cond=x_cond, verbose=False, steps=args.steps, use_ema=args.use_ema, log_count=args.steps
     )
-    x_pred = model_pred["x_pred"].detach().transpose(1, 2)
+    x_pred = model_pred["x_pred"].detach()  # (batch, num_points, 3)
 
     if return_steps:
         x_chain = model_pred["x_chain"]
@@ -166,12 +167,14 @@ def denoise_patch_batch(
     if filtering:
         n_outliers = int(x_pred.shape[1] * 0.01)
         x_pred, filter_mask = remove_outliers(x_pred, patch.transpose(1, 2), n_outliers)
-        patch_denoised = x_pred.cpu().squeeze().numpy()
-        patch_denoised * scale + center
+        patch_denoised = x_pred.cpu().numpy()  # (batch, num_points, 3)
+        patch_denoised = patch_denoised * scale + center
+        patch_denoised = np.nan_to_num(patch_denoised, nan=0.0, posinf=0.0, neginf=0.0)
         return patch_denoised, filter_mask
     else:
-        patch_denoised = x_pred.cpu().squeeze().numpy()
+        patch_denoised = x_pred.cpu().numpy()  # (batch, num_points, 3)
         patch_denoised = patch_denoised * scale + center
+        patch_denoised = np.nan_to_num(patch_denoised, nan=0.0, posinf=0.0, neginf=0.0)
         if return_steps:
             return patch_denoised, x_chain
         else:
@@ -516,6 +519,11 @@ def main():
                 patch_xyz, model, args, patch_rgb, patch_dino, return_steps=return_steps
             )
 
+        # Guard accumulation against non-finite values from model output.
+        patch_xyz = np.nan_to_num(patch_xyz, nan=0.0, posinf=0.0, neginf=0.0)
+        if return_steps:
+            patch_steps = np.nan_to_num(patch_steps, nan=0.0, posinf=0.0, neginf=0.0)
+
         if args.average_predictions:
             denoised, denoised_num_updates = update_prediction_noisy_batches(
                 denoised, denoised_num_updates, patch_xyz, patch_idxs, patch_cut_idxs
@@ -560,6 +568,9 @@ def main():
         denoised = np.concatenate(denoised, axis=0).reshape(-1, 3)
         idxs = fpsample.bucket_fps_kdline_sampling(denoised, len(room_points), h=7)
         denoised = denoised[idxs]
+
+    # Final safety pass before writing files.
+    denoised = np.nan_to_num(denoised, nan=0.0, posinf=0.0, neginf=0.0)
 
     prediction.points = o3d.utility.Vector3dVector(denoised)
     if room_colors is not None:

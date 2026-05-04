@@ -1,7 +1,7 @@
 import pvcnn.functional as F
 import torch
 import torch.nn as nn
-from torch.cuda.amp import custom_bwd, custom_fwd
+from torch.amp import custom_bwd, custom_fwd
 
 __all__ = ["BallQuery"]
 
@@ -13,11 +13,11 @@ class BallQuery(nn.Module):
         self.num_neighbors = num_neighbors
         self.include_coordinates = include_coordinates
 
-    @custom_bwd
+    @custom_bwd(device_type='cuda')
     def backward(self, *args, **kwargs):
         return super().backward(*args, **kwargs)
 
-    @custom_fwd(cast_inputs=torch.float32)
+    @custom_fwd(cast_inputs=torch.float32, device_type='cuda')
     def forward(self, points_coords, centers_coords, temb, points_features=None):
         points_coords = points_coords.contiguous()
         centers_coords = centers_coords.contiguous()

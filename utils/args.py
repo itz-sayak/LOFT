@@ -132,6 +132,11 @@ def parse_args():
 
         opt.out_sampling = os.path.join(os.path.dirname(opt.model_path), "sampling", model_name, scheduler_info)
 
+    # fall back to a sensible default when --save_dir was not provided
+    if opt.save_dir is None:
+        opt.save_dir = "checkpoints"
+        os.makedirs(opt.save_dir, exist_ok=True)
+
     # generating output dir
     output_dir = os.path.join(opt.save_dir, opt.name)
     if not os.path.exists(output_dir):

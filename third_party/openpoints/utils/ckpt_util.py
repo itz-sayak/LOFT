@@ -27,7 +27,7 @@ def resume_model(model, cfg, pretrained_path=None):
     logging.info(f"[RESUME INFO] Loading model weights from {pretrained_path}...")
 
     # load state dict
-    state_dict = torch.load(pretrained_path, map_location="cpu")
+    state_dict = torch.load(pretrained_path, map_location="cpu", weights_only=False)
     # parameter resume of base model
     base_ckpt = {k.replace("module.", ""): v for k, v in state_dict["model"].items()}
     model.load_state_dict(base_ckpt, strict=True)
@@ -59,7 +59,7 @@ def resume_optimizer(cfg, optimizer, pretrained_path=None):
         return 0, 0, 0
     logging.info(f"[RESUME INFO] Loading optimizer from {pretrained_path}...")
     # load state dict
-    state_dict = torch.load(pretrained_path, map_location="cpu")
+    state_dict = torch.load(pretrained_path, map_location="cpu", weights_only=False)
     # optimizer
     if state_dict["optimizer"] is not None and state_dict["optimizer"]:
         optimizer.load_state_dict(state_dict["optimizer"])
@@ -118,7 +118,7 @@ def resume_checkpoint(
         assert pretrained_path is not None
     printer("=> loading checkpoint '{}'".format(pretrained_path))
 
-    checkpoint = torch.load(pretrained_path, map_location="cpu")
+    checkpoint = torch.load(pretrained_path, map_location="cpu", weights_only=False)
     config.start_epoch = checkpoint["epoch"] + 1
     if optimizer is not None:
         try:
@@ -160,7 +160,7 @@ def load_checkpoint(model, pretrained_path, module=None):
     if not os.path.exists(pretrained_path):
         raise NotImplementedError("no checkpoint file from path %s..." % pretrained_path)
     # load state dict
-    state_dict = torch.load(pretrained_path, map_location="cpu")
+    state_dict = torch.load(pretrained_path, map_location="cpu", weights_only=False)
 
     # parameter resume of base model
     ckpt_state_dict = state_dict
@@ -205,7 +205,7 @@ def load_checkpoint_inv(model, pretrained_path, module=None):
     if not os.path.exists(pretrained_path):
         raise NotImplementedError("no checkpoint file from path %s..." % pretrained_path)
     # load state dict
-    state_dict = torch.load(pretrained_path, map_location="cpu")
+    state_dict = torch.load(pretrained_path, map_location="cpu", weights_only=False)
 
     # parameter resume of base model
     ckpt_state_dict = state_dict

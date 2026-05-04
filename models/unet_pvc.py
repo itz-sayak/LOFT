@@ -4,6 +4,7 @@ from typing import Dict
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 
 import models.train_utils as train_utils
@@ -20,6 +21,67 @@ from .pvcnn import (
     create_pvc_layer_params,
     create_sa_components,
 )
+
+
+class LatentWriteAttention(nn.Module):
+    """Cross-attention Write layer: N spatial points query M latent tokens.
+
+    queries  : per-point features  [B, query_dim, N]  (BCN layout)
+    keys/vals: latent tokens        [B, M, kv_dim]     (BNC layout)
+    returns  : per-point residual   [B, query_dim, N]  (BCN layout)
+
+    Supports query_dim != kv_dim (e.g., shallow FP decoder querying 512-dim latent).
+    Xavier-init output projection -> small residual at step 0.
+    """
+
+    def __init__(self, query_dim: int, kv_dim: int = None, num_heads: int = 8):
+        super().__init__()
+        kv_dim = kv_dim if kv_dim is not None else query_dim
+        while query_dim % num_heads != 0:
+            num_heads = num_heads // 2
+        assert num_heads >= 1
+        self.num_heads = num_heads
+        self.head_dim  = query_dim // num_heads
+        self.scale     = self.head_dim ** -0.5
+
+        self.norm_q = nn.LayerNorm(query_dim)
+        self.norm_k = nn.LayerNorm(kv_dim)
+        self.to_q   = nn.Linear(query_dim, query_dim, bias=False)
+        self.to_k   = nn.Linear(kv_dim, query_dim, bias=False)
+        self.to_v   = nn.Linear(kv_dim, query_dim, bias=False)
+        self.to_out = nn.Linear(query_dim, query_dim)
+
+        nn.init.xavier_uniform_(self.to_out.weight, gain=0.5)
+        nn.init.zeros_(self.to_out.bias)
+
+    def forward(self, features_bcn: torch.Tensor, latent_bnc: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            features_bcn: [B, query_dim, N] backbone features (BCN)
+            latent_bnc:   [B, M, kv_dim]    latent tokens (BNC)
+        Returns:
+            residual:     [B, query_dim, N] (BCN)
+        """
+        B, D, N = features_bcn.shape
+        q_in = features_bcn.permute(0, 2, 1)  # [B, N, D]
+        q_in = self.norm_q(q_in)
+        kv_in = self.norm_k(latent_bnc)
+
+        Q = self.to_q(q_in)     # [B, N, D]
+        K = self.to_k(kv_in)    # [B, M, D]
+        V = self.to_v(kv_in)    # [B, M, D]
+
+        h, d = self.num_heads, self.head_dim
+        Q = Q.view(B, N, h, d).transpose(1, 2)             # [B, h, N, d]
+        K = K.view(B, -1, h, d).transpose(1, 2)            # [B, h, M, d]
+        V = V.view(B, -1, h, d).transpose(1, 2)            # [B, h, M, d]
+
+        attn = (Q @ K.transpose(-2, -1)) * self.scale      # [B, h, N, M]
+        attn = attn.softmax(dim=-1)
+        out = attn @ V                                       # [B, h, N, d]
+        out = out.transpose(1, 2).reshape(B, N, D)          # [B, N, D]
+        out = self.to_out(out)                               # [B, N, D]
+        return out.permute(0, 2, 1)                          # [B, D, N]
 
 
 # adapted from https://github.com/alexzhou907/PVD
@@ -55,20 +117,30 @@ class PVCNN2Unet(nn.Module):
             nn.Linear(self.embed_dim, self.embed_dim),
         )
 
-        # global embedding
-        if pvd_cfg.use_global_embedding:
+        # global embedding / latent FiLM conditioning
+        latent_film = pvd_cfg.get("latent_film", False)
+        if pvd_cfg.get("use_global_embedding", False):
             self.cond_emb_dim = pvd_cfg.global_embedding_dim
             c = self.cond_emb_dim
-            global_pnet = Pnet2Stage(
+            self.global_pnet = Pnet2Stage(
                 [self.input_dim, c // 8, c // 4],
                 [c // 2, c],
             )
-            self.global_pnet = global_pnet
+        elif latent_film and pvd_cfg.get("film_cond_dim", 0) > 0:
+            self.cond_emb_dim = pvd_cfg.film_cond_dim
+            self.global_pnet = None
+            self.latent_pool_proj = nn.Sequential(
+                nn.Linear(pvd_cfg.film_cond_dim, pvd_cfg.film_cond_dim),
+                nn.SiLU(),
+                nn.Linear(pvd_cfg.film_cond_dim, pvd_cfg.film_cond_dim),
+            )
         else:
             self.global_pnet = None
             self.cond_emb_dim = 0
 
         self.f_embed_dim = pvd_cfg.get("feat_embed_dim", self.extra_feature_channels)
+
+        self.film_cond_dim = pvd_cfg.get("film_cond_dim", 0)
 
         self.embed_feats = None
         if self.f_embed_dim != self.extra_feature_channels:
@@ -81,6 +153,14 @@ class PVCNN2Unet(nn.Module):
                 Swish(),
                 nn.Conv1d(self.f_embed_dim, self.f_embed_dim, kernel_size=1, bias=True),
             )
+
+        # Cross-attention Write conditioning: per-point features attend to latent tokens.
+        latent_num_heads = pvd_cfg.get("latent_num_heads", 8)
+        if self.film_cond_dim > 0 and self.f_embed_dim > 0:
+            self.write_attn = LatentWriteAttention(self.f_embed_dim, kv_dim=self.film_cond_dim, num_heads=latent_num_heads)
+        else:
+            self.write_attn = None
+        self._feat_dropout_p = float(pvd_cfg.get("feat_dropout_before_attn", 0.0))
 
         sa_blocks, fp_blocks = create_pvc_layer_params(
             npoints=cfg.data.npoints,
@@ -143,6 +223,23 @@ class PVCNN2Unet(nn.Module):
 
         self.fp_layers = nn.ModuleList(fp_layers)
 
+        # Per-FP-level write_attn: injects latent conditioning into the decoder at each resolution.
+        fp_enable = pvd_cfg.get("fp_write_attn", True)
+        if self.film_cond_dim > 0 and fp_enable:
+            fp_channels_list = cfg.model.PVD.channels
+            fp_out_dims = [
+                fp_channels_list[3],  # FP0
+                fp_channels_list[3],  # FP1
+                fp_channels_list[2],  # FP2
+                fp_channels_list[1],  # FP3
+            ]
+            self.fp_write_attns = nn.ModuleList([
+                LatentWriteAttention(dim, kv_dim=self.film_cond_dim, num_heads=latent_num_heads)
+                for dim in fp_out_dims
+            ])
+        else:
+            self.fp_write_attns = None
+
         # output projection
         out_mlp = cfg.model.PVD.get("out_mlp", 128)
         layers, *_ = create_mlp_components(
@@ -169,10 +266,23 @@ class PVCNN2Unet(nn.Module):
         return emb
 
     def forward(self, x, t, x_cond=None):
+        # x_cond is either:
+        #  - [B, 3, N] noisy points for concat (legacy, extra_feature_channels=3)
+        #  - [B, M, D] latent tokens for LatentWriteAttention (latent mode)
+        # Detect latent mode: x_cond is [B, M, D] with M<<N and D>>3.
+        latent_tokens = None
         if x_cond is not None:
-            x = torch.cat([x, x_cond], dim=1)
+            if x_cond.ndim == 3 and x_cond.shape[1] != x.shape[2] and x_cond.shape[2] > 3:
+                # Latent tokens [B, M, D] — do NOT concat
+                latent_tokens = x_cond
+            else:
+                # Legacy: concat noisy points
+                x = torch.cat([x, x_cond], dim=1)
 
         (B, C, N), device = x.shape, x.device
+
+        if not hasattr(self, "extra_feature_channels"):
+            self.extra_feature_channels = 0
         assert (
             C == self.input_dim + self.extra_feature_channels
         ), f"input dim: {C}, expected: {self.input_dim + self.extra_feature_channels}"
@@ -187,6 +297,13 @@ class PVCNN2Unet(nn.Module):
             else:
                 features = self.embed_feats(features)
 
+        # Cross-attention Write: per-point conditioning from latent tokens
+        if latent_tokens is not None and self.write_attn is not None:
+            feat_drop_p = getattr(self, '_feat_dropout_p', 0.0)
+            if self.training and feat_drop_p > 0.0:
+                features = F.dropout(features, p=feat_drop_p, training=True)
+            features = features + self.write_attn(features, latent_tokens)
+
         # initialize data class
         data = PVCData(coords=coords, features=coords)
 
@@ -194,6 +311,9 @@ class PVCNN2Unet(nn.Module):
         if self.global_pnet is not None:
             global_feature = self.global_pnet(data)
             data.cond = global_feature
+        elif hasattr(self, 'latent_pool_proj') and latent_tokens is not None:
+            cond_global = latent_tokens.mean(dim=1)
+            data.cond = self.latent_pool_proj(cond_global)
         else:
             global_feature = None
 
@@ -258,6 +378,9 @@ class PVCNN2Unet(nn.Module):
                 cond=data.cond,
             )
             data = fp_blocks(data_fp)
+            # Multi-level FP decoder conditioning: inject latent tokens at each resolution.
+            if latent_tokens is not None and self.fp_write_attns is not None:
+                data.features = data.features + self.fp_write_attns[fp_idx](data.features, latent_tokens)
             out_features_list.append(data.features)
 
         for l in self.classifier:

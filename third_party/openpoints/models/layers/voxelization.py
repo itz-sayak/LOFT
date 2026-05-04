@@ -1,13 +1,13 @@
 import torch
 from torch.autograd import Function
-from torch.cuda.amp import custom_bwd, custom_fwd
+from torch.amp import custom_bwd, custom_fwd
 
 from third_party.openpoints.cpp import pointnet2_cuda
 
 
 class AvgVoxelization(Function):
     @staticmethod
-    @custom_fwd(cast_inputs=torch.float32)
+    @custom_fwd(cast_inputs=torch.float32, device_type='cuda')
     def forward(ctx, features, coords, resolution):
         """
         :param ctx:
@@ -25,7 +25,7 @@ class AvgVoxelization(Function):
         return out.view(b, c, resolution, resolution, resolution)
 
     @staticmethod
-    @custom_bwd
+    @custom_bwd(device_type='cuda')
     def backward(ctx, grad_output):
         """
         :param ctx:
