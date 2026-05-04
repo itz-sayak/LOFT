@@ -1,23 +1,29 @@
 <p align="center">
-  <h1 align="center">Semantics Know the Shape: Latent-Conditioned Flow Matching for 3D Point Cloud Denoising</h1>
+  <h1 align="center">LOFT: Latent-Guided Optimal Flow Transport for 3D Point Cloud Denoising</h1>
   <p align="center">
-    <strong>LOFT — Latent-Guided Optimal Flow Transport</strong>
+    <strong>Latent-conditioned OT-CFM for PUNet and ScanNet++</strong>
   </p>
 </p>
+<p align="center">
+  <a href="./assets/overview.png">
+    <img src="./assets/overview.png" width="100%">
+  </a>
+</p>
 
----
+<br>
 
-## Overview
+LOFT replaces the diffusion Schrodinger bridge used in P2P-Bridge with Optimal Transport Conditional Flow Matching (OT-CFM) and adds a learned latent conditioning pathway. A frozen SemanticAutoencoder encodes noisy geometry into latent tokens, a FreqEncodingTransformer refines those tokens as a function of time, and the PVCNN2Unet backbone consumes them through multi-level cross-attention.
 
-LOFT is a latent-conditioned flow matching framework for 3D point cloud denoising. It combines Optimal Transport Conditional Flow Matching (OT-CFM) with a semantic latent conditioning pipeline: a frozen SemanticAutoencoder extracts geometric latent tokens from noisy input, a trainable FreqEncodingTransformer refines them at each timestep, and these tokens are injected into the PVCNN2Unet denoising backbone via cross-attention at five architectural levels. The result is a velocity field that transports noisy point patches to clean geometry via a straight-line OT-optimal trajectory.
+This repository contains two LOFT branches:
 
-**Paper:** *Semantics Know the Shape: Latent-Conditioned Flow Matching for 3D Point Cloud Denoising*
+- PUNet synthetic object denoising via `configs/PVDS_PUNet_latent.yaml`
+- ScanNet++ real indoor scene denoising via `configs/PVDL_SNPP_latent.yaml`
 
----
+Both branches are denoising-only. They process overlapping patches and merge them back to the original point count. There is no output upsampling stage.
 
 ## Requirements
 
-Tested with Python 3.10, PyTorch 2.5.1+cu121, CUDA 12.1, Ubuntu 22.04, RTX 4090 24 GB.
+The code was tested with Python 3.10, PyTorch 2.5.1+cu121, CUDA 12.1, and Ubuntu 22.04.
 
 Create a conda environment:
 
@@ -26,120 +32,250 @@ conda create -n loft python=3.10
 conda activate loft
 ```
 
-Install PyTorch:
+Install PyTorch first:
 
 ```bash
 conda install pytorch==2.5.1 torchvision pytorch-cuda=12.1 -c pytorch -c nvidia --yes
 ```
 
-Install all other dependencies and compile custom CUDA extensions:
+Then install the remaining dependencies and compile the CUDA extensions:
 
 ```bash
 sh install.sh
 ```
 
----
-
 ## Data Preparation
 
-Download the PUNet dataset meshes and place them under `data/`:
+### Object data: PUNet
 
-```
+The PUNet branch expects the synthetic object data under the directory configured by `data.data_dir` in `configs/PVDS_PUNet_latent.yaml`. The active config in this repo points to `/mnt/zone/B/NEW/P2B_latent_DDPM/data`, with the following structure:
+
+```bash
 data/
-  10000_poisson/
-  30000_poisson/
-  50000_poisson/
+├── 10000_poisson/
+├── 30000_poisson/
+└── 50000_poisson/
 ```
 
-The data directory path is configured in `configs/PVDS_PUNet_latent.yaml` under `data.data_dir`.
+The denoising model works patch-wise with `npoints: 2048` and merges overlapping predictions back to the original point count with FPS.
 
----
+If you use `evaluate_objects.py` for benchmark evaluation, you can also point it to a separate test-set layout with `--data_path` and `--dataset_root`, following the original P2P-Bridge object evaluation format.
+
+### Indoor scenes: ScanNet++
+
+The ScanNet++ branch uses real iPhone scans plus per-point DINO features. The active training config is `configs/PVDL_SNPP_latent.yaml`.
+
+The expected components are:
+
+```bash
+/mnt/zone/A/scannetpp_release_realtrain/data
+/mnt/zone/A/P2B_latent_DDPM/snpp_real_dino_processed/<scene>/features/dino_iphone.npy
+/mnt/zone/A/P2B_latent_DDPM/snpp_real_processed_iphone_dino_500k
+```
+
+To build the processed training batches from raw ScanNet++ data, use:
+
+```bash
+conda run -n deepfill python data/preprocess_batches.py \
+  --data_root /mnt/zone/A/scannetpp_release_realtrain/data \
+  --output_root /mnt/zone/A/P2B_latent_DDPM/snpp_real_processed_iphone_dino_500k \
+  --feature_type none \
+  --use_iphone_dino_ply
+```
+
+For evaluation, the provided script reads scene ids from `splits/snpp_test_valid.txt` and expects each scene folder to contain `scans/iphone_dino.ply`.
 
 ## Training
+
+To train the PUNet LOFT model:
 
 ```bash
 python train.py --config configs/PVDS_PUNet_latent.yaml
 ```
 
-Checkpoints are saved to `checkpoints/otcfm_latent/` every 25,000 steps. Training runs for 450,000 steps at batch size 32 (~1.1 s/step on RTX 4090, ~10.1 GB VRAM).
+Important PUNet settings:
 
-Key config options in `configs/PVDS_PUNet_latent.yaml`:
+- bridge: latent OT-CFM
+- batch size: 32
+- steps: 450000
+- save interval: 25000
+- AE checkpoint: `/mnt/zone/B/NEW/P2B_latent_DDPM/checkpoints_ae_retrain_v3/ae_epoch_675.pth`
+- `latent_film: true`
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `model.ae_ckpt` | path to `ae_epoch_675.pth` | Frozen SemanticAE checkpoint |
-| `diffusion.latent_loss_weight` | 0.3 | Weight for cosine latent consistency loss |
-| `training.bs` | 32 | Batch size |
-| `diffusion.sampling_timesteps` | 10 | Euler ODE steps at inference |
+To train the ScanNet++ LOFT model:
 
----
+```bash
+CUDA_VISIBLE_DEVICES=1 PYTHONUNBUFFERED=1 python -u train.py --config configs/PVDL_SNPP_latent.yaml
+```
+
+Important ScanNet++ settings:
+
+- bridge: latent OT-CFM
+- batch size: 4
+- steps: 250000
+- save interval: 10000
+- scheduler: `CosineAnnealingLR`
+- AE checkpoint: `/mnt/zone/A/P2B_latent_DDPM/checkpoints_ae_snpp_real/ae_best_clean_cd.pth`
+- per-point DINO features enabled via `extra_feature_channels: 384`
+- `latent_film: false`
+
+For all available training arguments, run:
+
+```bash
+python train.py --help
+```
+
+## Checkpoints
+
+This repository uses the following checkpoint layout:
+
+```bash
+checkpoints/
+├── otcfm_latent/
+│   └── step_*.pth
+└── PVDL_SNPP_latent/
+    ├── opt.yaml
+    └── step_*.pth
+```
+
+The object branch uses checkpoints from `checkpoints/otcfm_latent/`. The ScanNet++ branch uses checkpoints from `checkpoints/PVDL_SNPP_latent/`.
 
 ## Evaluation
 
+### PUNet objects
+
+To evaluate the PUNet LOFT model on object data:
+
 ```bash
-python denoise_object.py --config configs/PVDS_PUNet_latent.yaml --model_path checkpoints/otcfm_latent/ckpt_best.pth
-python evaluate_objects.py
+python evaluate_objects.py \
+  --model_path checkpoints/otcfm_latent/step_200000.pth \
+  --dataset PUNet \
+  --use_ema \
+  --steps 10
 ```
 
----
+Outputs are written under `output_objects/<dataset>/` together with the evaluation summaries.
+
+To denoise a single `.xyz` object file:
+
+```bash
+python denoise_object.py \
+  --data_path test.xyz \
+  --save_path output.xyz \
+  --model_path checkpoints/otcfm_latent/step_200000.pth \
+  --use_ema \
+  --steps 10
+```
+
+### ScanNet++ indoor scenes
+
+To denoise the 4-scene ScanNet++ evaluation subset with the provided script:
+
+```bash
+bash scripts/denoise_snpp.sh \
+  /mnt/zone/A/P2B_latent_DDPM/snpp_evaluation \
+  checkpoints/PVDL_SNPP_latent/step_250000.pth \
+  1
+```
+
+This script:
+
+- reads scene ids from `splits/snpp_test_valid.txt`
+- denoises each `scans/iphone_dino.ply`
+- writes predictions to `predictions_dino/P2SB/`
+- runs `evaluate_rooms.py --dataset snpp --suffix _dino`
+
+To run room evaluation manually:
+
+```bash
+python evaluate_rooms.py --data_root /mnt/zone/A/P2B_latent_DDPM/snpp_evaluation --dataset snpp --suffix _dino
+```
+
+To summarize the per-scene metrics table:
+
+```bash
+python scripts/summarize_snpp_metrics.py \
+  --data_root /mnt/zone/A/P2B_latent_DDPM/snpp_evaluation \
+  --scene_file splits/snpp_test_valid.txt \
+  --suffix _dino \
+  --latent_pattern "250000_10_ema"
+```
+
+## Denoise Your Own Data
+
+### Real-world room scan
+
+To denoise a room point cloud:
+
+```bash
+python denoise_room.py \
+  --room_path <ROOM_PATH>/scans/iphone_dino.ply \
+  --model_path checkpoints/PVDL_SNPP_latent/step_250000.pth \
+  --out_path <ROOM_PATH>/predictions_dino/P2SB/output.ply \
+  --steps 10 \
+  --k 4
+```
+
+By default the script looks for DINO features at:
+
+```bash
+<ROOM_PATH>/features/dino_iphone.npy
+```
+
+You can change the feature file stem with `--feature_name`.
+
+### Synthetic object point cloud
+
+To denoise a single synthetic object point cloud in `.xyz` format:
+
+```bash
+python denoise_object.py \
+  --data_path <INPUT_XYZ> \
+  --save_path <OUTPUT_XYZ> \
+  --model_path checkpoints/otcfm_latent/step_200000.pth \
+  --use_ema \
+  --steps 10
+```
 
 ## Architecture
 
-See [architecture.md](architecture.md) for a full description of every component and its data flow, suitable for building block diagrams.
+The main LOFT components are:
 
-**Parameter summary:**
+- `models/flow_bridge.py`: `OTFlowBridge` and `LatentOTFlowBridge`
+- `models/autoencoder.py`: frozen SemanticAutoencoder
+- `models/freq_encoding_transformer.py`: timestep-conditioned latent refinement
+- `models/unet_pvc.py`: PVCNN2Unet backbone with latent write-attention
+- `models/model_loader.py`: model construction and checkpoint loading
 
-| Component | Parameters | Status |
-|-----------|----------:|--------|
-| SemanticAutoencoder | 5,985,653 | Frozen |
-| PVCNN2Unet backbone | ~19.4M | Trainable (lr = 3×10⁻⁴) |
-| LatentWriteAttention (×5) | ~1.07M | Trainable (lr = 9×10⁻⁴) |
-| FreqEncodingTransformer | 17,389,184 | Trainable (lr = 9×10⁻⁴) |
-| **Total trainable** | **~37.9M** | |
+The core conditioning pipeline is:
 
----
+```text
+noisy input -> SemanticAutoencoder -> latent tokens -> FreqEncodingTransformer(t) -> PVCNN2Unet cross-attention -> velocity field
+```
+
+For a more detailed technical description, see `TECHNICAL_SUMMARY.txt` and `architecture.md`.
 
 ## Repository Structure
 
-```
-configs/          Training configs (use PVDS_PUNet_latent.yaml for LOFT)
-models/
-  autoencoder.py          SemanticAutoencoder (frozen AE)
-  freq_encoding_transformer.py  FreqEncodingTransformer
-  flow_bridge.py          OTFlowBridge + LatentOTFlowBridge
-  unet_pvc.py             PVCNN2Unet + LatentWriteAttention
-  model_loader.py         Model instantiation + per-param-group optimizer
-dataloaders/      Dataset loaders
-metrics/          Chamfer Distance, EMD evaluation
-third_party/      PVCNN, OpenPoints libraries
-architecture.md   Full architecture description for block diagram
+```bash
+configs/        PUNet and ScanNet++ training configs
+data/           preprocessing utilities and dataset helpers
+dataloaders/    dataset loading code
+metrics/        Chamfer and point-to-face evaluation
+models/         OT-CFM bridge, AE, transformer, PVCNN backbone
+scripts/        evaluation and helper scripts
+splits/         train, val, and evaluation scene lists
+third_party/    external CUDA and point cloud libraries
+utils/          shared utilities
 ```
 
----
+## Notes
+
+- PUNet and ScanNet++ use different AE checkpoints and different conditioning settings.
+- PUNet keeps `latent_film: true`; ScanNet++ disables it and uses DINO features.
+- Both branches use Euler ODE sampling with 10 function evaluations at inference.
+- The ScanNet++ room evaluation pipeline in this repo targets the 4-scene subset listed in `splits/snpp_test_valid.txt`.
 
 ## Acknowledgements
 
-This work uses the PVCNN architecture. The SemanticAutoencoder and FreqEncodingTransformer are original contributions of this project.
-
-## Recent changes (2026-05-03)
-
-- `latent_film` explicitly disabled for ScanNet++ in `configs/PVDL_SNPP_latent.yaml` (`latent_film: false`).
-  - Reason: avoids train/inference mismatch when using AE FiLM with noisy real-scene inputs.
-  - PUNet latent config continues to use `latent_film: true` for upsampling tasks.
-
-## Applying the change (restart note)
-
-If a ScanNet++ training process is already running it will continue using the config that was loaded at start. To apply the `latent_film: false` change:
-
-```bash
-# attach to the otcfm screen and stop the process safely
-screen -r otcfm
-# inside screen: Ctrl-C to stop the job, or exit the training loop cleanly
-
-# then restart with the updated config
-conda activate deepfill
-cd /mnt/zone/B/NEW/P2P-Bridge-OT-real-latent
-CUDA_VISIBLE_DEVICES=1 PYTHONUNBUFFERED=1 python -u train.py --config configs/PVDL_SNPP_latent.yaml 2>&1 | tee logs/train_snpp_latent.log
-```
-
-Logs are written to `logs/` and checkpoints to `checkpoints/` as configured.
+This repository uses the PVCNN architecture and custom point cloud evaluation utilities. The LOFT latent OT-CFM formulation, SemanticAutoencoder integration, and FreqEncodingTransformer conditioning pipeline are implemented in this codebase.
