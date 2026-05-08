@@ -225,17 +225,36 @@ PARAMETER SUMMARY
   FreqEncodingTransformer: 17,389,184 (trainable)
   SemanticAutoencoder:      5,985,653 (FROZEN, 0 trainable)
 
-EVALUATION RESULTS (ScanNet++, 4-scene subset, iphone_dino.ply 500k pts)
---------------------------------------------------------------------------
-Scenes: 7bc286c1b6, 5748ce6f01, a24f64f7fb, bcd2436daf
-Checkpoint: PVDL_SNPP_latent/PVDL_SNPP_latent/step_200000.pth (EMA), steps=10
+EVALUATION RESULTS (ScanNet++, iphone_dino.ply 500k pts, EMA, 10 NFE)
+------------------------------------------------------------------------
+Per-scene breakdown (all metrics are Chamfer distance variants, lower=better):
 
-  Model              point_dist   face_dist   cd_pred_gt   cd_gt_pred
-  P2P original         23.111       1.774       23.132        1.934
-  P2B_latent_DDPM      21.802       2.159       21.824        2.333
-  LOFT (this repo)     21.482       2.114       21.503        2.285
+  Model                        Scene          point_dist   face_dist  cd_pred_gt  cd_gt_pred   sym_CD
+  P2P-original (XYZ 100k)      7bc286c1b6         4.154       0.111       4.173       0.162    2.168
+  P2P-original (XYZ 100k)      a24f64f7fb         2.024       2.396       2.048       2.647    2.347
+  P2P-original (XYZ 100k)      bcd2436daf         5.405       0.585       5.424       0.691    3.057
+  P2P-original (XYZ 100k)      [MEAN 3]           3.861       1.031       3.881       1.167    2.524
 
-Lower is better (Chamfer distance variants).
+  P2B-latent DDPM (200k)       7bc286c1b6         2.965       0.277       2.984       0.326    1.655
+  P2B-latent DDPM (200k)       a24f64f7fb         0.818       3.072       0.842       3.361    2.101
+  P2B-latent DDPM (200k)       bcd2436daf         3.683       0.814       3.702       0.915    2.308
+  P2B-latent DDPM (200k)       [MEAN 3]           2.488       1.388       2.509       1.534    2.022
+
+  LOFT / OT-CFM (230k)         7bc286c1b6         3.117       0.263       3.136       0.311    1.724
+  LOFT / OT-CFM (230k)         a24f64f7fb         0.857       3.253       0.881       3.554    2.217
+  LOFT / OT-CFM (230k)         bcd2436daf         3.835       0.914       3.854       1.020    2.437
+  LOFT / OT-CFM (230k)         [MEAN 3]           2.603       1.477       2.624       1.628    2.126
+
+  sym_CD = (cd_pred_gt + cd_gt_pred) / 2
+
+NOTE: Scene 5748ce6f01 is excluded from 3-scene means — it is an outlier with
+cd_pred_gt ~79-81 across ALL models (P2P=80.88, P2B=78.49, LOFT=78.86), indicating
+a coordinate frame / alignment issue in the original iPhone reconstruction, not a
+model failure. The 4-scene means from the original TECHNICAL_SUMMARY (which included
+this outlier) were: P2P=23.13, P2B=21.82, LOFT_200k=21.50, LOFT_230k=21.68.
+
+SUMMARY: On 3 valid scenes, P2B-latent DDPM 200k still leads LOFT 230k on all metrics.
+LOFT improves over P2P original. Further LOFT training past 230k needed to close gap.
 
 KEY DIFFERENCES FROM P2P-Bridge-OT-real (BASE)
 ------------------------------------------------

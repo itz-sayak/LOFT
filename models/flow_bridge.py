@@ -352,7 +352,7 @@ class OTFlowBridge(DiffusionModel):
 
         return {
             "x_chain": xs_tensor,
-            "x_pred": x_t,
+            "x_pred": x_t.transpose(1, 2),  # [B, N, 3] — matches DDPM convention
             "x_start": x_start,
         }
 
@@ -594,6 +594,12 @@ class LatentOTFlowBridge(OTFlowBridge):
         self.model.eval()
         self.freq_transformer.eval()
 
+        # Accept DINO features passed separately via x_cond (API compat with
+        # denoise_room.py which mirrors the DDPM call convention).
+        # Concatenate into x_start so the channel-split below works uniformly.
+        if x_cond is not None and x_start.shape[1] == 3:
+            x_start = torch.cat([x_start, x_cond], dim=1)  # [B, 3+D, N]
+
         # Separate DINO extra channels from xyz — DINO is static throughout ODE.
         extra = None
         if x_start.shape[1] > 3:
@@ -627,6 +633,6 @@ class LatentOTFlowBridge(OTFlowBridge):
 
         return {
             "x_chain": xs_tensor,
-            "x_pred": x_t,
+            "x_pred": x_t.transpose(1, 2),  # [B, N, 3] — matches DDPM convention
             "x_start": x_start,
         }
