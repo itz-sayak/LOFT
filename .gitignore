@@ -11,6 +11,8 @@ syn
 *.log
 *.png
 !assets/*.png
+!snpp_vis3/*.png
+!snpp_vis3/**/*.png
 *.ply
 wandb
 */PVD/output
