@@ -1,0 +1,49 @@
+# GeomTokenAE training on PUNet synthetic objects
+# Run from P2P-Bridge-OT-real-latent/:
+#   python scripts/train_autoencoder.py --config configs/AE_PUNet.yaml
+
+data:
+  data_dir: "/mnt/zone/A/P2P-Bridge-OT-real-latent/data/PUNet"
+  dataset: PUNet
+  augment: true
+  workers: 4
+  npoints: 2048
+
+model:
+  model_type: geom_token_ae
+  in_dim: 3
+  feat_dim: 512
+  use_dino: false
+  dino_dim: 384
+  sem_dim: 128
+  use_cross_attn: true
+  use_offset_attn: true
+
+training:
+  bs: 32
+  epochs: 300
+  save_interval: 10
+  ckpt_dir: "/mnt/zone/A/P2P-Bridge-OT-real-latent/checkpoints_ae_punet"
+  save_best_only: true
+  best_metric: "clean_cd"
+  resume_from: ""
+  start_epoch: 0
+  clean_weight: 1.0
+  denoise_weight: 1.0
+  l1_weight: 0.1
+  latent_consistency_weight: 0.05
+  latent_l2_weight: 1.0e-4
+  grad_clip:
+    value: 1.0
+  optimizer:
+    type: AdamW
+    lr: 1.0e-4
+    beta1: 0.9
+    beta2: 0.999
+    weight_decay: 1.0e-4
+  scheduler:
+    type: cosine
+    min_lr: 1.0e-6
+
+distribution_type: single
+local_rank: 0

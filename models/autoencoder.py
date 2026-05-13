@@ -172,9 +172,9 @@ class SE(nn.Module):
 
 
 # ---------------------------------------------------------------------
-#  Semantic-Attention Latent Autoencoder (AE-3, diffusion-ready)
+#  Geometry Token Autoencoder (AE-3, diffusion-ready)
 # ---------------------------------------------------------------------
-class SemanticAutoencoder(nn.Module):
+class GeomTokenAE(nn.Module):
     def __init__(
         self,
         in_dim=3,

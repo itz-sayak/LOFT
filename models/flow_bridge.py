@@ -361,7 +361,7 @@ class LatentOTFlowBridge(OTFlowBridge):
     """OT-CFM flow bridge with frozen AE + FreqEncodingTransformer latent conditioning.
 
     Pipeline:
-      - Frozen SemanticAE encodes noisy points -> [B, M=64, 512] latent tokens
+      - Frozen GeomTokenAE encodes noisy points -> [B, M=64, 512] latent tokens
       - Trainable FreqEncodingTransformer refines them (timestep-conditioned)
       - Latent tokens injected into backbone via LatentWriteAttention (cross-attn)
       - OT coupling + CFM loss on backbone output (unchanged from base OTFlowBridge)
@@ -372,11 +372,11 @@ class LatentOTFlowBridge(OTFlowBridge):
     def __init__(self, cfg, model):
         super().__init__(cfg, model)
 
-        from models.autoencoder import SemanticAutoencoder
+        from models.autoencoder import GeomTokenAE
         from models.freq_encoding_transformer import FreqEncodingTransformer
 
         # ---- Load frozen AE ----
-        self.ae = SemanticAutoencoder(
+        self.ae = GeomTokenAE(
             in_dim=getattr(cfg.model, "in_dim", 3),
             feat_dim=getattr(cfg.model, "feat_dim", 512),
             use_dino=getattr(cfg.model, "use_dino", False),

@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from models.p2pb import P2PB, space_indices, align_to_bnc
-from models.autoencoder import SemanticAutoencoder
+from models.autoencoder import GeomTokenAE
 from models.freq_encoding_transformer import FreqEncodingTransformer
 from loguru import logger
 
@@ -14,7 +14,7 @@ class LatentP2PB(P2PB):
         super().__init__(cfg, model)
 
         # ---- Load frozen AE ----
-        self.ae = SemanticAutoencoder(
+        self.ae = GeomTokenAE(
             in_dim=getattr(cfg.model, "in_dim", 3),
             feat_dim=getattr(cfg.model, "feat_dim", 512),
             use_dino=getattr(cfg.model, "use_dino", False),
